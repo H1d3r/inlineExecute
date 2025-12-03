@@ -28,7 +28,7 @@ inlineExecute -etwH -etwB /home/kali/Tools/Ghostpack-CompiledBinaries/Rubeus.exe
 The `-verbose` flag outputs debugging information.
 
 ```
-inlineExecute -verbose -etw /home/kali/Tools/Ghostpack-CompiledBinaries/Rubeus.exe triage
+inlineExecute -verbose -etwB /home/kali/Tools/Ghostpack-CompiledBinaries/Rubeus.exe triage
 ```
 
 Example usage with `Rubeus.exe triage`.
