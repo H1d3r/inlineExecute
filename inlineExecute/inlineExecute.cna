@@ -1,6 +1,6 @@
 # inlineExecute.cna
 
-$help = "Usage: inlineExecute [-etw] [-verbose] <filepath> <args>"; 
+$help = "Usage: inlineExecute [-etwH] [-etwB] [-verbose] <filepath> <args>"; 
 
 beacon_command_register(
 	"inlineExecute",
@@ -19,11 +19,15 @@ alias inlineExecute {
 	
 	@args = split(' ', $data);
 	
-	$patchEtw = false;
+	$patchEtwProviderHandle = false;
+	$patchEtwEnableBits = false;
 	$verbose = false;
 	for ($i = 0; $i < size(@args); $i++) {
-		if (@args[$i] iswm "-etw") {
-			$patchEtw = true;
+		if (@args[$i] iswm "-etwH") {
+			$patchEtwProviderHandle = true;
+			
+		} else if (@args[$i] iswm "-etwB") {
+			$patchEtwEnableBits = true;
 			
 		} else if (@args[$i] iswm "-verbose") {
 			$verbose = true;
@@ -61,7 +65,7 @@ alias inlineExecute {
 		return;
 	}
 	
-	$bof_args = bof_pack($1, "bizii", $assemblyBytes, $assemblyLength, $assemblyArgs, $patchEtw, $verbose);
+	$bof_args = bof_pack($1, "biziii", $assemblyBytes, $assemblyLength, $assemblyArgs, $patchEtwProviderHandle, $patchEtwEnableBits, $verbose);
 	
 	beacon_inline_execute($1, $bof, "go", $bof_args);
 }

