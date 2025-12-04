@@ -539,9 +539,30 @@ int isEtwFunc(unsigned char* funcAddr, void* etwEventWrite) {
     return 1;
 }
 
+int hasCoTemplateEventDescriptorCall(unsigned char* addr, void* etwEventWrite) {
+    // test    cs:Microsoft_Windows_DotNETRuntimeEnableBits, 40000000h (10 bytes)
+    // jz      short loc_* (2 bytes)
+    // lea     rdx, DebugIPCEventEnd (7 bytes)
+    // call    CoTemplateEventDescriptor (5 bytes)
+    unsigned char* callInstrAddr = addr + 10 + 2 + 7;
+    unsigned char* rip = addr + 10 + 2 + 7 + 5;
+
+    if (*callInstrAddr != 0xe8) { 
+        return 0; // not a call
+    }    
+
+    int offset = *(DWORD*)(callInstrAddr + 1);
+    unsigned char* funcAddr = rip + offset;
+
+    return isEtwFunc(funcAddr, etwEventWrite);
+}
+
 int* findDotNETRuntimeEnableBits() {
     void* clrBase = getImageBase(L"clr.dll");
     int clrSize = getImageSize(clrBase);
+
+    void* ntdllBase = getImageBase(L"ntdll.dll");
+    void* etwEventWrite = getProcAddr(ntdllBase, "EtwEventWrite");
 
     // assuming a max of 20 global variables that match the pattern
     int MAX = 20;
@@ -556,7 +577,11 @@ int* findDotNETRuntimeEnableBits() {
             continue;
         }
 
-        if (*(DWORD*)(addr + 6) != 0x80000000) {
+        if (*(DWORD*)(addr + 6) != 0x80000000 && *(DWORD*)(addr + 6) != 0x40000000) {
+            continue;
+        }
+
+        if (!hasCoTemplateEventDescriptorCall(addr, etwEventWrite)) {
             continue;
         }
 

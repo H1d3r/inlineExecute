@@ -70,7 +70,7 @@ int* findDotNETRuntimeEnableBits(HMODULE clrBase) {
     for (int i = 0; i < clrSize; i++) {
         unsigned char* addr = (unsigned char*)clrBase + i;
 
-        // matches "test cs:Microsoft_Windows_DotNETRuntimeEnableBits, 80000000h"
+        // matches "test cs:Microsoft_Windows_DotNETRuntimeEnableBits, 80000000h/40000000h"
         if (addr[0] != 0xf7 || addr[1] != 0x5) {
             continue;
         }
